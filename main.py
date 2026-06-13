@@ -1,30 +1,58 @@
 import os
 import asyncio
-import uuid
+import uuid # uuid for generating unique document IDs
 import chromadb
-import fitz
-import bcrypt
-import jwt
-from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status
+import fitz # PyMuPDF for PDF parsing
+import bcrypt # bcrypt this import is for password hashing, not related to ChromaDB :)
+import jwt # PyJWT
+from datetime import datetime, timedelta # basic date and time handling
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status, Request # FastAPI import for endpoints and request handling
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from google import genai
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, String, Integer, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
+import json
+import redis.asyncio as redis
+
+#IMPORTS FOR RATE LIMITING & CORS
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 load_dotenv()
 
+# APP Instance
 app = FastAPI()
 
-# =========================================
-# 1. AUTHENTICATION CONFIGURATION
-# =========================================
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "my-super-secret-development-key-awen")
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 1. CORS & RATE LIMITER SETUP
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+# Allows the HTML frontend to talk to this backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Limits users to prevent API spam Using their IP address
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 2. AUTHENTICATION CONFIGURATION
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 def get_password_hash(password: str) -> str:
     salt = bcrypt.gensalt()
@@ -41,9 +69,10 @@ def create_access_token(data: dict):
     return encoded_jwt
 
 
-# =========================================
-# 2. POSTGRESQL DATABASE SETUP (WITH USERS)
-# =========================================
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 3. POSTGRESQL & REDIS DATABASE SETUP
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
 if not SQLALCHEMY_DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not set in the .env file!")
@@ -63,12 +92,10 @@ class DocumentRecord(Base):
     id = Column(String, primary_key=True, index=True)
     filename = Column(String, index=True)
     chunk_count = Column(Integer)
-    owner_id = Column(Integer) # Tracks WHICH user owns this file
+    owner_id = Column(Integer) 
     upload_date = Column(DateTime, default=datetime.utcnow)
 
-# --- EPHEMERAL MODE (CLEAN SLATE) ---
-# Wipes Supabase clean every time the server restarts. 
-# NOTE: Once you move to production, delete the `drop_all` line so users aren't deleted!
+# Wipe Supabase clean every time the server restarts (Ephemeral Mode)
 Base.metadata.drop_all(bind=engine)
 Base.metadata.create_all(bind=engine)
 
@@ -79,10 +106,14 @@ def get_db():
     finally:
         db.close()
 
+# $$$$$$$ REDIS SETUP $$$$$$$
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-# =========================================
-# 3. CURRENT USER DEPENDENCY (THE SECURITY WALL)
-# =========================================
+
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 4. CURRENT USER DEPENDENCY
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -103,23 +134,22 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     return user
 
 
-# =========================================
-# 4. AI & EPHEMERAL VECTOR DB INITIALIZATION
-# =========================================
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 5. AI & EPHEMERAL VECTOR DB INITIALIZATION
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 client = genai.Client()
 
-# Uses computer RAM. Wipes completely clean when server stops.
 chroma_client = chromadb.EphemeralClient() 
 collection = chroma_client.get_or_create_collection(name="awen_collection")
 
 @app.get("/")
 async def root():
-    return {"message": "Awen is SECURE, Full-Stack, and running in Clean Slate Mode!"}
+    return {"message": "Awen is SECURE, Full-Stack, Rate-Limited, Cached, and running in Clean Slate Mode!"}
 
 
-# =========================================
-# 5. AUTHENTICATION ENDPOINTS
-# =========================================
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 6. AUTHENTICATION ENDPOINTS
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 @app.post("/register")
 async def register_user(username: str, password: str, db: Session = Depends(get_db)):
     existing_user = db.query(UserRecord).filter(UserRecord.username == username).first()
@@ -148,9 +178,9 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = 
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-# =========================================
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 # TEXT CHUNKING HELPER
-# =========================================
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 def chunk_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50):
     chunks = []
     start = 0
@@ -161,16 +191,16 @@ def chunk_text(text: str, chunk_size: int = 500, chunk_overlap: int = 50):
     return chunks
 
 
-# =========================================
-# 6. SECURED CORE ENDPOINTS
-# =========================================
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+# 7. SECURED CORE ENDPOINTS
+# $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 ALLOWED_CONTENT_TYPES = {"text/plain", "application/pdf"}
 
 @app.post("/upload")
 async def upload_document(
     file: UploadFile = File(...), 
     db: Session = Depends(get_db),
-    current_user: UserRecord = Depends(get_current_user) # Locks the endpoint
+    current_user: UserRecord = Depends(get_current_user) 
 ):
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(status_code=400, detail="Please upload a text or PDF file.")
@@ -188,7 +218,7 @@ async def upload_document(
             pdf_document = fitz.open(stream=content, filetype="pdf")
             for page_num in range(len(pdf_document)):
                 page = pdf_document.load_page(page_num)
-                text += str(page.get_text()) # Pylance fix
+                text += str(page.get_text()) 
             pdf_document.close()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to parse PDF: {str(e)}")
@@ -197,7 +227,6 @@ async def upload_document(
     if not chunks:
         raise HTTPException(status_code=400, detail="No readable text found.")
     
-    # UUID + User ID prevents crashes and isolates data
     unique_file_id = f"user_{current_user.id}_{uuid.uuid4().hex[:8]}_{file.filename}"
     
     chunk_ids = [f"{unique_file_id}_chunk_{i}" for i in range(len(chunks))]
@@ -221,10 +250,23 @@ async def upload_document(
 
 
 @app.post("/query")
+@limiter.limit("5/minute") # Rate limiter active!
 async def query_rag(
+    request: Request, # Required by the rate limiter
     query: str, 
-    current_user: UserRecord = Depends(get_current_user) # Locks the endpoint
+    current_user: UserRecord = Depends(get_current_user) 
 ):
+    # $$$$$$$ REDIS CACHE CHECK $$$$$$$
+    cache_key = f"cache:user_{current_user.id}:query_{query}"
+    cached_result = await redis_client.get(cache_key)
+    
+    if cached_result:
+        print("⚡ CACHE HIT! Returning instant response from Redis.")
+        return json.loads(cached_result)
+
+    print("🐢 CACHE MISS! Asking Gemini...")
+    
+    # $$$$$$$ IF NOT CACHED, PROCEED TO VECTOR SEARCH $$$$$$$
     search_results = await asyncio.to_thread(
         collection.query,
         query_texts=[query],
@@ -255,10 +297,18 @@ async def query_rag(
             model='gemini-2.5-flash-lite',
             contents=prompt,
         )
-        return {
+        
+        final_response = {
             "query": query, 
             "ai_response": response.text, 
-            "requested_by": current_user.username
+            "requested_by": current_user.username,
+            "source": "Gemini AI"
         }
+        
+        # Save the answer to Redis for 1 hour (3600 seconds)
+        await redis_client.set(cache_key, json.dumps(final_response), ex=3600)
+        
+        return final_response
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI API Error: {str(e)}")
