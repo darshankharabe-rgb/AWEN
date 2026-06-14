@@ -17,7 +17,7 @@ AWEN is a high-performance, full-stack Retrieval-Augmented Generation (RAG) plat
 | :--- | :--- |
 | **Frontend** | React, Vite, Tailwind CSS |
 | **Backend API** | FastAPI, Python, Pydantic, Uvicorn |
-| **Vector Database & AI** | ChromaDB, LangChain/LlamaIndex, `all-MiniLM-L6-v2` Embeddings, Gemini API |
+| **Vector Database & AI** | ChromaDB, `all-MiniLM-L6-v2` Embeddings, Gemini API |
 | **Caching Layer** | Redis Engine |
 | **DevOps & Orchestration** | Docker, Docker Compose |
 
