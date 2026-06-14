@@ -1,0 +1,18 @@
+services:
+  # 1. Your FastAPI Application
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:         
+      - .env         
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+
+  # 2. Your Redis Cache
+  redis:
+    image: redis:latest
+    ports:
+      - "9000:6379"

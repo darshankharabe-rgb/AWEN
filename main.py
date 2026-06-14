@@ -1,21 +1,21 @@
 import os
 import asyncio
-import uuid # uuid for generating unique document IDs
+import uuid 
 import chromadb
-import fitz # PyMuPDF for PDF parsing
-import bcrypt # bcrypt this import is for password hashing, not related to ChromaDB :)
-import jwt # PyJWT
-from datetime import datetime, timedelta # basic date and time handling
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status, Request # FastAPI import for endpoints and request handling
+import fitz 
+import bcrypt 
+import jwt 
+from datetime import datetime, timedelta 
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, status, Request 
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from google import genai
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, String, Integer, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 import json
-import redis.asyncio as redis
+import redis.asyncio as aioredis # BACK TO STANDARD REDIS CACHING
 
-#IMPORTS FOR RATE LIMITING & CORS
+# IMPORTS FOR RATE LIMITING & CORS
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -108,7 +108,7 @@ def get_db():
 
 # $$$$$$$ REDIS SETUP $$$$$$$
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
 
 
 # $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
@@ -144,7 +144,7 @@ collection = chroma_client.get_or_create_collection(name="awen_collection")
 
 @app.get("/")
 async def root():
-    return {"message": "Awen is SECURE, Full-Stack, Rate-Limited, Cached, and running in Clean Slate Mode!"}
+    return {"message": "Awen is SECURE, Full-Stack, Rate-Limited, Cached (Redis), and running in Clean Slate Mode!"}
 
 
 # $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
@@ -250,19 +250,18 @@ async def upload_document(
 
 
 @app.post("/query")
-@limiter.limit("5/minute") # Rate limiter active!
-async def query_rag(
-    request: Request, # Required by the rate limiter
-    query: str, 
-    current_user: UserRecord = Depends(get_current_user) 
-):
-    # $$$$$$$ REDIS CACHE CHECK $$$$$$$
-    cache_key = f"cache:user_{current_user.id}:query_{query}"
-    cached_result = await redis_client.get(cache_key)
+@limiter.limit("5/minute")
+async def query_rag(request: Request, query: str, current_user: UserRecord = Depends(get_current_user)):
     
-    if cached_result:
-        print("⚡ CACHE HIT! Returning instant response from Redis.")
-        return json.loads(cached_result)
+    # $$$$$$$ REDIS EXACT MATCH CACHE CHECK $$$$$$$
+    normalized_query = query.strip().lower()
+    redis_key = f"cache:user_{current_user.id}:query_{normalized_query}"
+    
+    cached_redis_result = await redis_client.get(redis_key)
+    
+    if cached_redis_result:
+        print("⚡ REDIS CACHE HIT!")
+        return json.loads(cached_redis_result)
 
     print("🐢 CACHE MISS! Asking Gemini...")
     
@@ -305,8 +304,8 @@ async def query_rag(
             "source": "Gemini AI"
         }
         
-        # Save the answer to Redis for 1 hour (3600 seconds)
-        await redis_client.set(cache_key, json.dumps(final_response), ex=3600)
+        # --- SAVE TO REDIS CACHE ---
+        await redis_client.set(redis_key, json.dumps(final_response), ex=3600)
         
         return final_response
         
