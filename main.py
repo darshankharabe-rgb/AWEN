@@ -33,7 +33,11 @@ app = FastAPI()
 # Allows the HTML frontend to talk to this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+    "http://localhost:5173",  
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,7 +52,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 # 2. AUTHENTICATION CONFIGURATION
 # $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-key")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY is not set!")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
